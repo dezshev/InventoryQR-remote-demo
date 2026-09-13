@@ -134,7 +134,7 @@ button,input{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #5
 button:hover{background:#3a3a3a}
 #status{font-size:13px;color:#aaa}
 </style></head><body>
-<header>Приложение «Инвентарь» в симуляторе iOS. Щелчок — касание, перетаскивание — свайп.
+<header>Приложение «Инвентарь» в симуляторе iOS. Щелчок — касание, перетаскивание — свайп. Чтобы ввести текст, нажмите на поле в приложении и печатайте на клавиатуре.
 <div id="status">подключение…</div></header>
 <div id="wrap"><img id="screen" alt="экран симулятора" draggable="false"></div>
 <div class="bar">
@@ -163,6 +163,16 @@ img.addEventListener('pointerdown',e=>{down={p:rel(e),t:Date.now()};img.setPoint
 img.addEventListener('pointerup',e=>{if(!down)return;const p=rel(e);const d=Math.hypot(p.x-down.p.x,p.y-down.p.y);
   if(d<0.02) send('tap',{x:p.x,y:p.y}); else send('swipe',{x1:down.p.x,y1:down.p.y,x2:p.x,y2:p.y,ms:Date.now()-down.t});
   down=null;});
+// печать на клавиатуре компьютера: символы копятся и отправляются пачкой
+let buf='',timer=null;
+document.addEventListener('keydown',e=>{
+  if(document.activeElement&&document.activeElement.id==='text') return;
+  if(e.ctrlKey||e.metaKey||e.altKey) return;
+  if(e.key==='Backspace'){e.preventDefault();flush();send('key',{key:'backspace'});return;}
+  if(e.key==='Enter'){e.preventDefault();flush();send('key',{key:'enter'});return;}
+  if(e.key.length===1){e.preventDefault();buf+=e.key;clearTimeout(timer);timer=setTimeout(flush,400);}
+});
+function flush(){if(buf){const t=buf;buf='';send('text',{text:t});}}
 async function send(action,body){body.action=action;
   await fetch('input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   setTimeout(refresh,150);}
