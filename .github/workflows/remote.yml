@@ -1,0 +1,65 @@
+name: Remote simulator
+
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Сколько минут держать сеанс"
+        default: "20"
+
+jobs:
+  remote:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - name: Enable VNC
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          K=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo $K -configure -allowAccessFor -allUsers -privs -all || true
+          sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" || true
+          sudo $K -restart -agent -console || true
+          sudo $K -activate || true
+          sleep 5
+          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "5900 не слушается"
+
+      - name: Try screensharing daemon
+        run: |
+          if ! sudo lsof -iTCP:5900 -sTCP:LISTEN >/dev/null; then
+            sudo launchctl enable system/com.apple.screensharing || true
+            sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
+            sleep 5
+          fi
+          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "5900 всё ещё не слушается"
+          printf 'RFB check: '; (exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3) || true
+
+      - name: noVNC + tunnel
+        run: |
+          brew install cloudflared >/dev/null
+          pip3 install --break-system-packages websockify >/dev/null 2>&1 || pip3 install websockify >/dev/null
+          git clone -q --depth 1 https://github.com/novnc/noVNC.git novnc
+          nohup websockify --web novnc 6080 127.0.0.1:5900 > websockify.log 2>&1 &
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > cloudflared.log 2>&1 &
+          for i in $(seq 1 30); do
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1)
+            [ -n "$URL" ] && break; sleep 2
+          done
+          echo "URL=$URL/vnc.html?autoconnect=1&resize=scale"
+
+      - name: Simulator with app placeholder
+        run: |
+          UDID=$(xcrun simctl list devices available | grep -m1 "iPhone 16 Pro (" | grep -Eo '[0-9A-F-]{36}')
+          xcrun simctl boot "$UDID" || true
+          open -a Simulator
+          screencapture -x shot.png || true
+
+      - name: Upload shot
+        uses: actions/upload-artifact@v4
+        with:
+          name: shot
+          path: shot.png
+
+      - name: Keep alive
+        run: |
+          sleep $(( ${{ github.event.inputs.minutes }} * 60 ))
