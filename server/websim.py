@@ -4,6 +4,8 @@
 Запуск: websim.py <UDID> <порт> <пароль>
 """
 import base64
+import secrets
+import urllib.parse
 import http.server
 import io
 import json
@@ -19,6 +21,19 @@ BUNDLE = "by.gstu.itp.InventoryQR"
 MAX_HEIGHT = 1100
 
 state = {"jpeg": b"", "px": (1, 1), "stamp": 0.0}
+TOKEN = secrets.token_hex(16)
+
+LOGIN_PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Вход — симулятор iOS</title>
+<style>body{margin:0;background:#1e1e1e;color:#eee;font:17px system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh}
+form{background:#2b2b2b;padding:32px 36px;border-radius:14px;text-align:center;box-shadow:0 8px 30px #0008}
+h1{font-size:22px;margin:0 0 6px}p{color:#bbb;margin:0 0 18px}
+input{font:inherit;padding:10px 14px;border-radius:8px;border:1px solid #555;background:#1e1e1e;color:#eee;width:220px}
+button{font:inherit;margin-left:8px;padding:10px 18px;border-radius:8px;border:0;background:#2f81f7;color:#fff;cursor:pointer}
+.err{color:#ff7b72;margin:14px 0 0}</style></head><body>
+<form method="post" action="login"><h1>Приложение «Инвентарь»</h1><p>Введите пароль, чтобы открыть симулятор iPhone</p>
+<input type="password" name="password" placeholder="Пароль" autofocus><button type="submit">Войти</button>{error}</form>
+</body></html>"""
 lock = threading.Lock()
 
 
@@ -184,18 +199,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def authorized(self):
-        header = self.headers.get("Authorization", "")
-        if header.startswith("Basic "):
-            try:
-                user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
-                if pw == PASSWORD:
-                    return True
-            except Exception:  # noqa: BLE001
-                pass
-        self.send_response(401)
-        self.send_header("WWW-Authenticate", 'Basic realm="simulator", charset="UTF-8"')
-        self.end_headers()
+        cookie = self.headers.get("Cookie", "")
+        if ("websim=" + TOKEN) in cookie:
+            return True
+        if self.command == "GET" and not self.path.startswith(("/frame.jpg", "/debug", "/desktop.jpg")):
+            self.send_page(LOGIN_PAGE.replace("{error}", ""))
+        else:
+            self.send_response(401)
+            self.end_headers()
         return False
+
+    def send_page(self, html, status=200, headers=()):
+        body = html.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        for k, v in headers:
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self):
         if not self.authorized():
@@ -238,6 +260,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_POST(self):
+        if self.path.startswith("/login"):
+            length = int(self.headers.get("Content-Length", "0"))
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"))
+            if form.get("password", [""])[0].strip() == PASSWORD:
+                self.send_response(303)
+                self.send_header("Set-Cookie", "websim=%s; Path=/; HttpOnly; SameSite=Lax; Secure" % TOKEN)
+                self.send_header("Location", "/")
+                self.end_headers()
+            else:
+                self.send_page(LOGIN_PAGE.replace("{error}", '<p class="err">Неверный пароль</p>'), status=403)
+            return
         if not self.authorized():
             return
         length = int(self.headers.get("Content-Length", "0"))
