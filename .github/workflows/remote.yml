@@ -43,6 +43,7 @@ jobs:
       - name: Install idb and tools
         run: |
           brew tap facebook/fb >/dev/null
+          brew trust facebook/fb || true
           brew install idb-companion cloudflared >/dev/null
           pip3 install --break-system-packages fb-idb pillow >/dev/null 2>&1 || pip3 install fb-idb pillow >/dev/null
 
