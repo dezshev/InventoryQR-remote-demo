@@ -6,6 +6,9 @@ on:
       ref:
         description: "Тег или ветка приложения (lab1, lab2, lab3, lab4, main)"
         default: "main"
+      device:
+        description: "Устройство: iPhone 16 Pro или iPad Pro 13-inch (M4)"
+        default: "iPhone 16 Pro"
       minutes:
         description: "Сколько минут держать сеанс (до 300)"
         default: "60"
@@ -18,13 +21,18 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 330
     steps:
+      - name: Checkout tools
+        uses: actions/checkout@v4
+
       - name: Checkout app
         uses: actions/checkout@v4
         with:
           repository: dezshev/RPiPiP-InventoryQR
           ref: ${{ github.event.inputs.ref }}
+          path: app
 
       - name: Build app for simulator
+        working-directory: app
         run: |
           brew install xcodegen >/dev/null
           xcodegen generate
@@ -32,105 +40,47 @@ jobs:
             -sdk iphonesimulator -destination "generic/platform=iOS Simulator" \
             -derivedDataPath build CODE_SIGNING_ALLOWED=NO > build.log 2>&1 || { tail -40 build.log; exit 1; }
 
-      - name: Start simulators with the app
+      - name: Install idb and tools
         run: |
-          APP=build/Build/Products/Debug-iphonesimulator/InventoryQR.app
-          pick() { xcrun simctl list devices available | grep -m1 "$1" | grep -Eo '[0-9A-F-]{36}'; }
-          PHONE=$(pick "iPhone 16 Pro (")
-          xcrun simctl boot "$PHONE"
-          xcrun simctl bootstatus "$PHONE" -b
-          xcrun simctl install "$PHONE" "$APP"
-          xcrun simctl status_bar "$PHONE" override --time "9:41" --batteryState charged --batteryLevel 100 || true
-          open -a Simulator
-          sleep 5
-          xcrun simctl launch "$PHONE" by.gstu.itp.InventoryQR
-          echo "PHONE=$PHONE" >> "$GITHUB_ENV"
+          brew tap facebook/fb >/dev/null
+          brew install idb-companion cloudflared >/dev/null
+          pip3 install --break-system-packages fb-idb pillow >/dev/null 2>&1 || pip3 install fb-idb pillow >/dev/null
 
-      - name: Enable screen sharing
+      - name: Start simulator with the app
         env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          DEVICE: ${{ github.event.inputs.device }}
         run: |
-          # macOS предлагает авторизацию Apple (логин и пароль) — создаём отдельного пользователя demo
-          sudo sysadminctl -addUser demo -fullName "Demo" -password "$VNC_PASSWORD" -admin
-          # Разрешения TCC на захват экрана и ввод для служб демонстрации экрана (SIP на раннере отключён)
-          DB="/Library/Application Support/com.apple.TCC/TCC.db"
-          NOW=$(date +%s)
-          for client in com.apple.screensharing com.apple.screensharing.agent com.apple.RemoteDesktopAgent; do
-            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
-              sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$NOW,NULL,NULL,'UNUSED',0);"
-            done
-          done
-          for client in /System/Library/CoreServices/RemoteManagement/ScreensharingAgent.bundle/Contents/MacOS/ScreensharingAgent                         /System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd                         /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent; do
-            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
-              sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$NOW,NULL,NULL,'UNUSED',0);"
-            done
-          done
-          sudo sqlite3 "$DB" "select client, service from access where client like '%creen%' or client like '%ARD%' or client like '%RemoteDesktop%';"
-          K=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-          sudo $K -configure -allowAccessFor -specifiedUsers >/dev/null
-          sudo $K -configure -users demo,$USER -access -on -privs -all >/dev/null
-          sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" >/dev/null
-          sudo $K -restart -agent -console >/dev/null
-          sudo $K -activate >/dev/null
-          sudo killall screensharingd ScreensharingAgent 2>/dev/null || true
-          sleep 5
-          python3 - <<'PY'
-          import socket
-          s = socket.create_connection(("127.0.0.1", 5900), timeout=10)
-          print("server:", s.recv(12))
-          s.sendall(b"RFB 003.008\n")
-          n = s.recv(1)[0]
-          print("security types:", list(s.recv(n)))
-          PY
+          UDID=$(xcrun simctl list devices available | grep -m1 "$DEVICE (" | grep -Eo '[0-9A-F-]{36}')
+          [ -z "$UDID" ] && UDID=$(xcrun simctl list devices available | grep -m1 "iPhone 16 Pro (" | grep -Eo '[0-9A-F-]{36}')
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl install "$UDID" app/build/Build/Products/Debug-iphonesimulator/InventoryQR.app
+          xcrun simctl status_bar "$UDID" override --time "9:41" --batteryState charged --batteryLevel 100 || true
+          xcrun simctl launch "$UDID" by.gstu.itp.InventoryQR
+          idb connect "$UDID" || true
+          echo "UDID=$UDID" >> "$GITHUB_ENV"
 
-      - name: Diagnostics
+      - name: Web access
         env:
-          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          SIM_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          csrutil status || true
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "select client, service, auth_value from access where service in ('kTCCServiceScreenCapture','kTCCServicePostEvent','kTCCServiceAccessibility');" || true
-          pip3 install --break-system-packages vncdotool >/dev/null 2>&1 || pip3 install vncdotool >/dev/null
-          mkdir -p diag
-          timeout 60 vncdo -s 127.0.0.1::5900 -p "$VNC_PASSWORD" capture diag/vnc_capture.png && echo "захват через VNC выполнен" || echo "захват через VNC не удался"
-          screencapture -x diag/screencapture.png || true
-
-      - name: Upload diagnostics
-        uses: actions/upload-artifact@v4
-        with:
-          name: diag
-          path: diag
-
-      - name: Browser access (noVNC + Cloudflare tunnel)
-        run: |
-          brew install cloudflared >/dev/null
-          pip3 install --break-system-packages websockify >/dev/null 2>&1 || pip3 install websockify >/dev/null
-          git clone -q --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/novnc"
-          cat > "$RUNNER_TEMP/tunnel.sh" <<'SH'
-          #!/bin/bash
-          # Запуск прокси noVNC и туннеля; ссылка пишется в link/link.txt и в ветку session репозитория
           T=$RUNNER_TEMP
-          pkill -f websockify; pkill -f cloudflared
-          nohup websockify --web "$T/novnc" 6080 127.0.0.1:5900 >> "$T/websockify.log" 2>&1 &
-          : > "$T/cloudflared.log"
-          nohup cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:6080 > "$T/cloudflared.log" 2>&1 &
+          nohup python3 server/websim.py "$UDID" 8080 "$SIM_PASSWORD" > "$T/websim.log" 2>&1 &
+          sleep 5
+          curl -s -o /dev/null -w "local server: %{http_code}\n" -u "demo:$SIM_PASSWORD" http://127.0.0.1:8080/
+          nohup cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8080 > "$T/cloudflared.log" 2>&1 &
           for i in $(seq 1 60); do
             URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$T/cloudflared.log" | head -1)
             [ -n "$URL" ] && break; sleep 2
           done
-          LINK="$URL/vnc.html?autoconnect=1&resize=scale"
-          mkdir -p "$GITHUB_WORKSPACE/link" && echo "$LINK" > "$GITHUB_WORKSPACE/link/link.txt"
-          D=$(mktemp -d); cd "$D"
-          git init -q -b session && git config user.name "github-actions" && git config user.email "actions@github.com"
-          { echo "# Текущий сеанс"; echo; echo "$LINK"; echo; echo "Имя пользователя: demo"; } > README.md
-          git add README.md && git commit -q -m "Ссылка на сеанс"
-          git push -q -f "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" session:session
-          echo "$LINK"
-          SH
-          chmod +x "$RUNNER_TEMP/tunnel.sh"
-          "$RUNNER_TEMP/tunnel.sh"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          mkdir -p link && echo "$URL" > link/link.txt
+          D=$(mktemp -d)
+          ( cd "$D" && git init -q -b session && git config user.name "github-actions" && git config user.email "actions@github.com" \
+            && { echo "# Текущий сеанс"; echo; echo "$URL"; echo; echo "Логин: любой, пароль — выдан владельцем репозитория."; } > README.md \
+            && git add README.md && git commit -q -m "Ссылка на сеанс" \
+            && git push -q -f "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" session:session ) || true
+          echo "$URL"
 
       - name: Publish link
         uses: actions/upload-artifact@v4
@@ -139,19 +89,13 @@ jobs:
           path: link/link.txt
 
       - name: Keep session alive
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           M=${{ github.event.inputs.minutes }}
           [ "$M" -gt 300 ] && M=300
           END=$(( $(date +%s) + M * 60 ))
           while [ "$(date +%s)" -lt "$END" ]; do
-            if ! pgrep -f cloudflared >/dev/null || grep -q "Unregistered tunnel connection\|failed to serve tunnel" "$RUNNER_TEMP/cloudflared.log"; then
-              echo "$(date) туннель перезапускается"; tail -15 "$RUNNER_TEMP/cloudflared.log"
-              "$RUNNER_TEMP/tunnel.sh"
-            fi
-            pgrep -f websockify >/dev/null || { echo "$(date) websockify упал"; tail -15 "$RUNNER_TEMP/websockify.log"; "$RUNNER_TEMP/tunnel.sh"; }
+            pgrep -f websim.py >/dev/null || { echo "$(date) сервер упал"; tail -20 "$RUNNER_TEMP/websim.log"; break; }
             sleep 30
           done
-          echo "--- cloudflared"; tail -40 "$RUNNER_TEMP/cloudflared.log"
-          echo "--- websockify"; tail -40 "$RUNNER_TEMP/websockify.log"
+          echo "--- websim"; tail -40 "$RUNNER_TEMP/websim.log"
+          echo "--- cloudflared"; tail -20 "$RUNNER_TEMP/cloudflared.log"

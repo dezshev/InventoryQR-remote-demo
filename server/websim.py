@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""Веб-доступ к iOS-симулятору: экран через simctl, касания и ввод через idb.
+
+Запуск: websim.py <UDID> <порт> <пароль>
+"""
+import base64
+import http.server
+import io
+import json
+import subprocess
+import sys
+import threading
+import time
+
+from PIL import Image
+
+UDID, PORT, PASSWORD = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+BUNDLE = "by.gstu.itp.InventoryQR"
+MAX_HEIGHT = 1100
+
+state = {"jpeg": b"", "px": (1, 1), "stamp": 0.0}
+lock = threading.Lock()
+
+
+def run(*args, timeout=15):
+    return subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
+
+
+def screen_points():
+    """Размер экрана в точках (idb работает в точках, скриншот — в пикселях)."""
+    try:
+        out = run("idb", "describe", "--udid", UDID, "--json").stdout
+        dims = json.loads(out).get("screen_dimensions") or {}
+        return dims.get("width_points"), dims.get("height_points")
+    except Exception as exc:  # noqa: BLE001
+        print("describe error:", exc, flush=True)
+        return None, None
+
+
+POINTS = (None, None)
+
+
+def capture_loop():
+    path = "/tmp/websim_frame.png"
+    while True:
+        try:
+            r = run("xcrun", "simctl", "io", UDID, "screenshot", "--type=png", path, timeout=10)
+            if r.returncode == 0:
+                im = Image.open(path).convert("RGB")
+                px = im.size
+                k = MAX_HEIGHT / im.height
+                if k < 1:
+                    im = im.resize((int(im.width * k), MAX_HEIGHT), Image.BILINEAR)
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=72)
+                with lock:
+                    state.update(jpeg=buf.getvalue(), px=px, stamp=time.time())
+        except Exception as exc:  # noqa: BLE001
+            print("capture error:", exc, flush=True)
+        time.sleep(0.25)
+
+
+PAGE = """<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Симулятор iOS — Инвентарь</title>
+<style>
+body{margin:0;background:#1e1e1e;color:#eee;font:15px system-ui,sans-serif;display:flex;flex-direction:column;align-items:center}
+header{padding:10px 16px;text-align:center}
+#wrap{position:relative;touch-action:none;user-select:none}
+#screen{height:calc(100vh - 150px);max-width:96vw;border-radius:28px;border:6px solid #333;cursor:pointer;display:block}
+.bar{display:flex;gap:8px;flex-wrap:wrap;justify-content:center;padding:10px}
+button,input{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #555;background:#2d2d2d;color:#eee}
+button:hover{background:#3a3a3a}
+#status{font-size:13px;color:#aaa}
+</style></head><body>
+<header>Приложение «Инвентарь» в симуляторе iPhone. Щелчок — касание, перетаскивание — свайп.
+<div id="status">подключение…</div></header>
+<div id="wrap"><img id="screen" alt="экран симулятора" draggable="false"></div>
+<div class="bar">
+<input id="text" placeholder="Текст для ввода в поле" size="24">
+<button onclick="send('text',{text:document.getElementById('text').value});document.getElementById('text').value=''">Ввести</button>
+<button onclick="send('key',{key:'backspace'})">⌫</button>
+<button onclick="send('key',{key:'enter'})">Enter</button>
+<button onclick="send('home',{})">Домой</button>
+<button onclick="send('relaunch',{})">Перезапустить приложение</button>
+</div>
+<script>
+const img=document.getElementById('screen'),st=document.getElementById('status');
+let busy=false;
+async function refresh(){
+  if(busy) return; busy=true;
+  try{const r=await fetch('frame.jpg?'+Date.now(),{cache:'no-store'});
+      if(r.ok){const b=await r.blob();const u=URL.createObjectURL(b);const old=img.src;img.src=u;if(old.startsWith('blob:'))URL.revokeObjectURL(old);st.textContent='подключено';}
+      else st.textContent='ошибка '+r.status;}
+  catch(e){st.textContent='нет связи';}
+  busy=false;
+}
+setInterval(refresh,350); refresh();
+function rel(e){const r=img.getBoundingClientRect();return {x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height};}
+let down=null;
+img.addEventListener('pointerdown',e=>{down={p:rel(e),t:Date.now()};img.setPointerCapture(e.pointerId);});
+img.addEventListener('pointerup',e=>{if(!down)return;const p=rel(e);const d=Math.hypot(p.x-down.p.x,p.y-down.p.y);
+  if(d<0.02) send('tap',{x:p.x,y:p.y}); else send('swipe',{x1:down.p.x,y1:down.p.y,x2:p.x,y2:p.y,ms:Date.now()-down.t});
+  down=null;});
+async function send(action,body){body.action=action;
+  await fetch('input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  setTimeout(refresh,150);}
+</script></body></html>"""
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def authorized(self):
+        header = self.headers.get("Authorization", "")
+        if header.startswith("Basic "):
+            try:
+                user, _, pw = base64.b64decode(header[6:]).decode().partition(":")
+                if pw == PASSWORD:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="simulator", charset="UTF-8"')
+        self.end_headers()
+        return False
+
+    def do_GET(self):
+        if not self.authorized():
+            return
+        if self.path.startswith("/frame.jpg"):
+            with lock:
+                data = state["jpeg"]
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            body = PAGE.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    def do_POST(self):
+        if not self.authorized():
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        req = json.loads(self.rfile.read(length) or b"{}")
+        w, h = POINTS
+        if not w or not h:
+            with lock:
+                px = state["px"]
+            w, h = px[0] / 3, px[1] / 3
+        act = req.get("action")
+        try:
+            if act == "tap":
+                run("idb", "ui", "tap", "--udid", UDID, str(round(req["x"] * w)), str(round(req["y"] * h)))
+            elif act == "swipe":
+                dur = max(0.1, min(1.0, req.get("ms", 300) / 1000))
+                run("idb", "ui", "swipe", "--udid", UDID, "--duration", str(dur),
+                    str(round(req["x1"] * w)), str(round(req["y1"] * h)),
+                    str(round(req["x2"] * w)), str(round(req["y2"] * h)))
+            elif act == "text" and req.get("text"):
+                run("idb", "ui", "text", "--udid", UDID, req["text"])
+            elif act == "key":
+                code = {"backspace": "42", "enter": "40"}[req["key"]]
+                run("idb", "ui", "key", "--udid", UDID, code)
+            elif act == "home":
+                run("idb", "ui", "button", "--udid", UDID, "HOME")
+            elif act == "relaunch":
+                run("xcrun", "simctl", "terminate", UDID, BUNDLE)
+                run("xcrun", "simctl", "launch", UDID, BUNDLE)
+        except Exception as exc:  # noqa: BLE001
+            print("input error:", exc, flush=True)
+        self.send_response(204)
+        self.end_headers()
+
+
+if __name__ == "__main__":
+    POINTS = screen_points()
+    print("screen points:", POINTS, flush=True)
+    threading.Thread(target=capture_loop, daemon=True).start()
+    http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
