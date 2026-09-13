@@ -22,8 +22,15 @@ state = {"jpeg": b"", "px": (1, 1), "stamp": 0.0}
 lock = threading.Lock()
 
 
+DEBUG = []
+
+
 def run(*args, timeout=15):
-    return subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
+    r = subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
+    if args[0] in ("cliclick", "osascript"):
+        DEBUG.append({"cmd": list(args)[:6], "rc": r.returncode, "out": r.stdout[-300:], "err": r.stderr[-300:]})
+        del DEBUG[:-30]
+    return r
 
 
 def window_rect():
@@ -139,6 +146,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if not self.authorized():
+            return
+        if self.path.startswith("/debug"):
+            info = {"log": DEBUG}
+            try:
+                info["window"] = window_rect()
+            except Exception as exc:  # noqa: BLE001
+                info["window_error"] = str(exc)
+            body = json.dumps(info, ensure_ascii=False, indent=1).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.startswith("/desktop.jpg"):
+            subprocess.run(["screencapture", "-x", "-t", "jpg", "/tmp/websim_desktop.jpg"], timeout=10)
+            data = open("/tmp/websim_desktop.jpg", "rb").read()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.end_headers()
+            self.wfile.write(data)
             return
         if self.path.startswith("/frame.jpg"):
             with lock:
