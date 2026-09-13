@@ -68,6 +68,24 @@ jobs:
           print("security types:", list(s.recv(n)))
           PY
 
+      - name: Diagnostics
+        env:
+          VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
+        run: |
+          csrutil status || true
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "select client, service, auth_value from access where service in ('kTCCServiceScreenCapture','kTCCServicePostEvent','kTCCServiceAccessibility');" || true
+          pip3 install --break-system-packages vncdotool >/dev/null 2>&1 || pip3 install vncdotool >/dev/null
+          mkdir -p diag
+          timeout 60 vncdo -s 127.0.0.1::5900 -p "$VNC_PASSWORD" capture diag/vnc_capture.png && echo "захват через VNC выполнен" || echo "захват через VNC не удался"
+          screencapture -x diag/screencapture.png || true
+
+      - name: Upload diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag
+          path: diag
+
       - name: Browser access (noVNC + Cloudflare tunnel)
         run: |
           brew install cloudflared >/dev/null
