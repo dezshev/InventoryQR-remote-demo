@@ -81,6 +81,14 @@ jobs:
             [ -n "$URL" ] && break; sleep 2
           done
           mkdir -p link && echo "$URL" > link/link.txt
+          {
+            echo "## Симулятор запущен"
+            echo ""
+            echo "Откройте ссылку: **$URL**"
+            echo ""
+            echo "Логин — любой (например, demo), пароль — значение секрета VNC_PASSWORD."
+            echo "Сеанс работает ${{ github.event.inputs.minutes }} мин; досрочно завершить — кнопка «Cancel workflow»."
+          } >> "$GITHUB_STEP_SUMMARY"
           D=$(mktemp -d)
           ( cd "$D" && git init -q -b session && git config user.name "github-actions" && git config user.email "actions@github.com" \
             && { echo "# Текущий сеанс"; echo; echo "$URL"; echo; echo "Логин: любой, пароль — выдан владельцем репозитория."; } > README.md \
