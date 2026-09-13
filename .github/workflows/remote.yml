@@ -89,12 +89,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/link" && echo "$LINK" > "$GITHUB_WORKSPACE/link/link.txt"
           D=$(mktemp -d); cd "$D"
           git init -q -b session && git config user.name "github-actions" && git config user.email "actions@github.com"
-          printf '# Текущий сеанс
-
-%s
-
-Имя пользователя: demo
-' "$LINK" > README.md
+          { echo "# Текущий сеанс"; echo; echo "$LINK"; echo; echo "Имя пользователя: demo"; } > README.md
           git add README.md && git commit -q -m "Ссылка на сеанс"
           git push -q -f "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" session:session
           echo "$LINK"
