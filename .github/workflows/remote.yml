@@ -43,7 +43,7 @@ jobs:
           xcrun simctl status_bar "$PHONE" override --time "9:41" --batteryState charged --batteryLevel 100 || true
           open -a Simulator
           sleep 5
-          xcrun simctl launch "$PHONE" by.gstu.itp.InventoryQR -seedSampleData
+          xcrun simctl launch "$PHONE" by.gstu.itp.InventoryQR
           echo "PHONE=$PHONE" >> "$GITHUB_ENV"
 
       - name: Enable screen sharing
@@ -52,12 +52,27 @@ jobs:
         run: |
           # macOS предлагает авторизацию Apple (логин и пароль) — создаём отдельного пользователя demo
           sudo sysadminctl -addUser demo -fullName "Demo" -password "$VNC_PASSWORD" -admin
+          # Разрешения TCC на захват экрана и ввод для служб демонстрации экрана (SIP на раннере отключён)
+          DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          NOW=$(date +%s)
+          for client in com.apple.screensharing com.apple.screensharing.agent com.apple.RemoteDesktopAgent; do
+            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
+              sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',0,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$NOW,NULL,NULL,'UNUSED',0);"
+            done
+          done
+          for client in /System/Library/CoreServices/RemoteManagement/ScreensharingAgent.bundle/Contents/MacOS/ScreensharingAgent                         /System/Library/CoreServices/RemoteManagement/screensharingd.bundle/Contents/MacOS/screensharingd                         /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/MacOS/ARDAgent; do
+            for service in kTCCServiceScreenCapture kTCCServicePostEvent kTCCServiceAccessibility; do
+              sudo sqlite3 "$DB" "INSERT OR REPLACE INTO access VALUES('$service','$client',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$NOW,NULL,NULL,'UNUSED',0);"
+            done
+          done
+          sudo sqlite3 "$DB" "select client, service from access where client like '%creen%' or client like '%ARD%' or client like '%RemoteDesktop%';"
           K=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
           sudo $K -configure -allowAccessFor -specifiedUsers >/dev/null
           sudo $K -configure -users demo,$USER -access -on -privs -all >/dev/null
           sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" >/dev/null
           sudo $K -restart -agent -console >/dev/null
           sudo $K -activate >/dev/null
+          sudo killall screensharingd ScreensharingAgent 2>/dev/null || true
           sleep 5
           python3 - <<'PY'
           import socket
