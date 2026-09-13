@@ -69,8 +69,12 @@ jobs:
         run: |
           T=$RUNNER_TEMP
           nohup python3 server/websim.py "$UDID" 8080 "$SIM_PASSWORD" > "$T/websim.log" 2>&1 &
-          sleep 5
-          curl -s -o /dev/null -w "local server: %{http_code}\n" -u "demo:$SIM_PASSWORD" http://127.0.0.1:8080/
+          code=000
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -u "demo:$SIM_PASSWORD" http://127.0.0.1:8080/ || true)
+            [ "$code" = "200" ] && break; sleep 2
+          done
+          echo "local server: $code"; cat "$T/websim.log"
           nohup cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8080 > "$T/cloudflared.log" 2>&1 &
           for i in $(seq 1 60); do
             URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$T/cloudflared.log" | head -1)
