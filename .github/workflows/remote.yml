@@ -3,63 +3,94 @@ name: Remote simulator
 on:
   workflow_dispatch:
     inputs:
+      ref:
+        description: "Тег или ветка приложения (lab1, lab2, lab3, lab4, main)"
+        default: "main"
       minutes:
-        description: "Сколько минут держать сеанс"
-        default: "20"
+        description: "Сколько минут держать сеанс (до 300)"
+        default: "60"
 
 jobs:
   remote:
     runs-on: macos-15
-    timeout-minutes: 90
+    timeout-minutes: 330
     steps:
-      - name: Enable VNC
+      - name: Checkout app
+        uses: actions/checkout@v4
+        with:
+          repository: dezshev/RPiPiP-InventoryQR
+          ref: ${{ github.event.inputs.ref }}
+
+      - name: Build app for simulator
+        run: |
+          brew install xcodegen >/dev/null
+          xcodegen generate
+          xcodebuild build -project InventoryQR.xcodeproj -scheme InventoryQR \
+            -sdk iphonesimulator -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath build CODE_SIGNING_ALLOWED=NO > build.log 2>&1 || { tail -40 build.log; exit 1; }
+
+      - name: Start simulators with the app
+        run: |
+          APP=build/Build/Products/Debug-iphonesimulator/InventoryQR.app
+          pick() { xcrun simctl list devices available | grep -m1 "$1" | grep -Eo '[0-9A-F-]{36}'; }
+          PHONE=$(pick "iPhone 16 Pro (")
+          xcrun simctl boot "$PHONE"
+          xcrun simctl bootstatus "$PHONE" -b
+          xcrun simctl install "$PHONE" "$APP"
+          xcrun simctl status_bar "$PHONE" override --time "9:41" --batteryState charged --batteryLevel 100 || true
+          open -a Simulator
+          sleep 5
+          xcrun simctl launch "$PHONE" by.gstu.itp.InventoryQR -seedSampleData
+          echo "PHONE=$PHONE" >> "$GITHUB_ENV"
+
+      - name: Enable screen sharing
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
           K=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-          sudo $K -configure -allowAccessFor -allUsers -privs -all || true
-          sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" || true
-          sudo $K -restart -agent -console || true
-          sudo $K -activate || true
+          sudo $K -configure -allowAccessFor -allUsers -privs -all >/dev/null
+          sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" >/dev/null
+          sudo $K -restart -agent -console >/dev/null
+          sudo $K -activate >/dev/null
           sleep 5
-          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "5900 не слушается"
+          python3 - <<'PY'
+          import socket
+          s = socket.create_connection(("127.0.0.1", 5900), timeout=10)
+          print("server:", s.recv(12))
+          s.sendall(b"RFB 003.008\n")
+          n = s.recv(1)[0]
+          print("security types:", list(s.recv(n)))
+          PY
 
-      - name: Try screensharing daemon
-        run: |
-          if ! sudo lsof -iTCP:5900 -sTCP:LISTEN >/dev/null; then
-            sudo launchctl enable system/com.apple.screensharing || true
-            sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist || true
-            sleep 5
-          fi
-          sudo lsof -iTCP:5900 -sTCP:LISTEN || echo "5900 всё ещё не слушается"
-          printf 'RFB check: '; (exec 3<>/dev/tcp/127.0.0.1/5900; head -c 12 <&3) || true
-
-      - name: noVNC + tunnel
+      - name: Browser access (noVNC + Cloudflare tunnel)
         run: |
           brew install cloudflared >/dev/null
           pip3 install --break-system-packages websockify >/dev/null 2>&1 || pip3 install websockify >/dev/null
-          git clone -q --depth 1 https://github.com/novnc/noVNC.git novnc
-          nohup websockify --web novnc 6080 127.0.0.1:5900 > websockify.log 2>&1 &
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > cloudflared.log 2>&1 &
-          for i in $(seq 1 30); do
-            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' cloudflared.log | head -1)
+          git clone -q --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/novnc"
+          nohup websockify --web "$RUNNER_TEMP/novnc" 6080 127.0.0.1:5900 > "$RUNNER_TEMP/websockify.log" 2>&1 &
+          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          for i in $(seq 1 60); do
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1)
             [ -n "$URL" ] && break; sleep 2
           done
-          echo "URL=$URL/vnc.html?autoconnect=1&resize=scale"
+          LINK="$URL/vnc.html?autoconnect=1&resize=scale"
+          mkdir -p link && echo "$LINK" > link/link.txt
+          {
+            echo "## Симулятор запущен"
+            echo ""
+            echo "Ссылка: $LINK"
+            echo ""
+            echo "Пароль — значение секрета VNC_PASSWORD. Сеанс открыт ${{ github.event.inputs.minutes }} мин."
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Simulator with app placeholder
-        run: |
-          UDID=$(xcrun simctl list devices available | grep -m1 "iPhone 16 Pro (" | grep -Eo '[0-9A-F-]{36}')
-          xcrun simctl boot "$UDID" || true
-          open -a Simulator
-          screencapture -x shot.png || true
-
-      - name: Upload shot
+      - name: Publish link
         uses: actions/upload-artifact@v4
         with:
-          name: shot
-          path: shot.png
+          name: link
+          path: link/link.txt
 
-      - name: Keep alive
+      - name: Keep session alive
         run: |
-          sleep $(( ${{ github.event.inputs.minutes }} * 60 ))
+          M=${{ github.event.inputs.minutes }}
+          [ "$M" -gt 300 ] && M=300
+          sleep $(( M * 60 ))
