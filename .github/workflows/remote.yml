@@ -10,6 +10,9 @@ on:
         description: "Сколько минут держать сеанс (до 300)"
         default: "60"
 
+permissions:
+  contents: write
+
 jobs:
   remote:
     runs-on: macos-15
@@ -70,21 +73,36 @@ jobs:
           brew install cloudflared >/dev/null
           pip3 install --break-system-packages websockify >/dev/null 2>&1 || pip3 install websockify >/dev/null
           git clone -q --depth 1 https://github.com/novnc/noVNC.git "$RUNNER_TEMP/novnc"
-          nohup websockify --web "$RUNNER_TEMP/novnc" 6080 127.0.0.1:5900 > "$RUNNER_TEMP/websockify.log" 2>&1 &
-          nohup cloudflared tunnel --no-autoupdate --url http://127.0.0.1:6080 > "$RUNNER_TEMP/cloudflared.log" 2>&1 &
+          cat > "$RUNNER_TEMP/tunnel.sh" <<'SH'
+          #!/bin/bash
+          # Запуск прокси noVNC и туннеля; ссылка пишется в link/link.txt и в ветку session репозитория
+          T=$RUNNER_TEMP
+          pkill -f websockify; pkill -f cloudflared
+          nohup websockify --web "$T/novnc" 6080 127.0.0.1:5900 >> "$T/websockify.log" 2>&1 &
+          : > "$T/cloudflared.log"
+          nohup cloudflared tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:6080 > "$T/cloudflared.log" 2>&1 &
           for i in $(seq 1 60); do
-            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/cloudflared.log" | head -1)
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$T/cloudflared.log" | head -1)
             [ -n "$URL" ] && break; sleep 2
           done
           LINK="$URL/vnc.html?autoconnect=1&resize=scale"
-          mkdir -p link && echo "$LINK" > link/link.txt
-          {
-            echo "## Симулятор запущен"
-            echo ""
-            echo "Ссылка: $LINK"
-            echo ""
-            echo "Имя пользователя: demo, пароль — значение секрета VNC_PASSWORD. Сеанс открыт ${{ github.event.inputs.minutes }} мин."
-          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$GITHUB_WORKSPACE/link" && echo "$LINK" > "$GITHUB_WORKSPACE/link/link.txt"
+          D=$(mktemp -d); cd "$D"
+          git init -q -b session && git config user.name "github-actions" && git config user.email "actions@github.com"
+          printf '# Текущий сеанс
+
+%s
+
+Имя пользователя: demo
+' "$LINK" > README.md
+          git add README.md && git commit -q -m "Ссылка на сеанс"
+          git push -q -f "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" session:session
+          echo "$LINK"
+          SH
+          chmod +x "$RUNNER_TEMP/tunnel.sh"
+          "$RUNNER_TEMP/tunnel.sh"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish link
         uses: actions/upload-artifact@v4
@@ -93,7 +111,19 @@ jobs:
           path: link/link.txt
 
       - name: Keep session alive
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           M=${{ github.event.inputs.minutes }}
           [ "$M" -gt 300 ] && M=300
-          sleep $(( M * 60 ))
+          END=$(( $(date +%s) + M * 60 ))
+          while [ "$(date +%s)" -lt "$END" ]; do
+            if ! pgrep -f cloudflared >/dev/null || grep -q "Unregistered tunnel connection\|failed to serve tunnel" "$RUNNER_TEMP/cloudflared.log"; then
+              echo "$(date) туннель перезапускается"; tail -15 "$RUNNER_TEMP/cloudflared.log"
+              "$RUNNER_TEMP/tunnel.sh"
+            fi
+            pgrep -f websockify >/dev/null || { echo "$(date) websockify упал"; tail -15 "$RUNNER_TEMP/websockify.log"; "$RUNNER_TEMP/tunnel.sh"; }
+            sleep 30
+          done
+          echo "--- cloudflared"; tail -40 "$RUNNER_TEMP/cloudflared.log"
+          echo "--- websockify"; tail -40 "$RUNNER_TEMP/websockify.log"
