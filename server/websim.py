@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Веб-доступ к iOS-симулятору: экран через simctl, касания и ввод через idb.
+"""Веб-доступ к iOS-симулятору: экран через simctl, касания и ввод через cliclick по окну Simulator.
 
 Запуск: websim.py <UDID> <порт> <пароль>
 """
@@ -26,15 +26,26 @@ def run(*args, timeout=15):
     return subprocess.run(list(args), capture_output=True, text=True, timeout=timeout)
 
 
-def screen_points():
-    """Размер экрана в точках (idb работает в точках, скриншот — в пикселях)."""
-    try:
-        out = run("idb", "describe", "--udid", UDID, "--json").stdout
-        dims = json.loads(out).get("screen_dimensions") or {}
-        return dims.get("width_points"), dims.get("height_points")
-    except Exception as exc:  # noqa: BLE001
-        print("describe error:", exc, flush=True)
-        return None, None
+def window_rect():
+    """Положение и размер окна Simulator на экране Mac (в точках)."""
+    script = 'tell application "System Events" to tell process "Simulator" to get {position, size} of front window'
+    out = run("osascript", "-e", script).stdout.strip()
+    x, y, w, h = [float(v) for v in out.replace(" ", "").split(",")]
+    return x, y, w, h
+
+
+def to_mac(nx, ny):
+    """Нормированные координаты экрана устройства -> координаты на экране Mac."""
+    x, y, w, h = window_rect()
+    with lock:
+        pw, ph = state["px"]
+    content_h = w * ph / pw
+    top = y + (h - content_h)          # над изображением устройства — заголовок окна
+    return round(x + nx * w), round(top + ny * content_h)
+
+
+def activate():
+    run("osascript", "-e", 'tell application "Simulator" to activate')
 
 
 POINTS = (None, None)
@@ -151,27 +162,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         req = json.loads(self.rfile.read(length) or b"{}")
-        w, h = POINTS
-        if not w or not h:
-            with lock:
-                px = state["px"]
-            w, h = px[0] / 3, px[1] / 3
         act = req.get("action")
         try:
+            activate()
             if act == "tap":
-                run("idb", "ui", "tap", "--udid", UDID, str(round(req["x"] * w)), str(round(req["y"] * h)))
+                X, Y = to_mac(req["x"], req["y"])
+                run("cliclick", "c:%d,%d" % (X, Y))
             elif act == "swipe":
-                dur = max(0.1, min(1.0, req.get("ms", 300) / 1000))
-                run("idb", "ui", "swipe", "--udid", UDID, "--duration", str(dur),
-                    str(round(req["x1"] * w)), str(round(req["y1"] * h)),
-                    str(round(req["x2"] * w)), str(round(req["y2"] * h)))
+                X1, Y1 = to_mac(req["x1"], req["y1"])
+                X2, Y2 = to_mac(req["x2"], req["y2"])
+                steps = ["dd:%d,%d" % (X1, Y1)]
+                for i in range(1, 9):
+                    steps += ["w:15", "dm:%d,%d" % (X1 + (X2 - X1) * i / 8, Y1 + (Y2 - Y1) * i / 8)]
+                steps += ["du:%d,%d" % (X2, Y2)]
+                run("cliclick", *steps)
             elif act == "text" and req.get("text"):
-                run("idb", "ui", "text", "--udid", UDID, req["text"])
+                run("cliclick", "t:" + req["text"])
             elif act == "key":
-                code = {"backspace": "42", "enter": "40"}[req["key"]]
-                run("idb", "ui", "key", "--udid", UDID, code)
+                run("cliclick", "kp:" + {"backspace": "delete", "enter": "return"}[req["key"]])
             elif act == "home":
-                run("idb", "ui", "button", "--udid", UDID, "HOME")
+                run("cliclick", "kd:cmd,shift", "t:h", "ku:cmd,shift")
             elif act == "relaunch":
                 run("xcrun", "simctl", "terminate", UDID, BUNDLE)
                 run("xcrun", "simctl", "launch", UDID, BUNDLE)
@@ -182,7 +192,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    POINTS = screen_points()
-    print("screen points:", POINTS, flush=True)
+    activate()
     threading.Thread(target=capture_loop, daemon=True).start()
     http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
