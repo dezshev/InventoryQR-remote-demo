@@ -55,6 +55,49 @@ def activate():
     run("osascript", "-e", 'tell application "Simulator" to activate')
 
 
+SETUP_SCRIPT = """
+tell application "Simulator" to activate
+delay 1
+tell application "System Events" to tell process "Simulator"
+    try
+        set mi to menu item "Show Device Bezels" of menu "Window" of menu bar 1
+        if (value of attribute "AXMenuItemMarkChar" of mi) is not missing value then click mi
+    end try
+    delay 1
+    set position of front window to {10, 40}
+end tell
+"""
+
+DISMISS_SCRIPT = """
+tell application "System Events"
+    repeat with procName in {"UserNotificationCenter", "CoreServicesUIAgent", "universalAccessAuthWarn", "SecurityAgent"}
+        if exists process procName then
+            tell process procName
+                repeat with w in windows
+                    repeat with b in {"Allow", "OK", "Разрешить"}
+                        if exists button b of w then click button b of w
+                    end repeat
+                end repeat
+            end tell
+        end if
+    end repeat
+end tell
+"""
+
+
+def setup_window():
+    run("osascript", "-e", SETUP_SCRIPT, timeout=30)
+
+
+def dismiss_loop():
+    while True:
+        try:
+            run("osascript", "-e", DISMISS_SCRIPT, timeout=20)
+        except Exception as exc:  # noqa: BLE001
+            print("dismiss error:", exc, flush=True)
+        time.sleep(15)
+
+
 POINTS = (None, None)
 
 
@@ -188,7 +231,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not self.authorized():
             return
         length = int(self.headers.get("Content-Length", "0"))
-        req = json.loads(self.rfile.read(length) or b"{}")
+        try:
+            req = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            self.send_response(400)
+            self.end_headers()
+            return
         act = req.get("action")
         try:
             activate()
@@ -219,6 +267,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    activate()
+    setup_window()
+    threading.Thread(target=dismiss_loop, daemon=True).start()
     threading.Thread(target=capture_loop, daemon=True).start()
     http.server.ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
