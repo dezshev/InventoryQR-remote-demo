@@ -70,7 +70,7 @@ end tell
 
 DISMISS_SCRIPT = """
 tell application "System Events"
-    repeat with procName in {"UserNotificationCenter", "CoreServicesUIAgent", "universalAccessAuthWarn", "SecurityAgent"}
+    repeat with procName in {"UserNotificationCenter"}
         if exists process procName then
             tell process procName
                 repeat with w in windows
@@ -252,7 +252,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 steps += ["du:%d,%d" % (X2, Y2)]
                 run("cliclick", *steps)
             elif act == "text" and req.get("text"):
-                run("cliclick", "t:" + req["text"])
+                # текст (в том числе кириллица) передаётся через буфер обмена симулятора и Cmd+V
+                subprocess.run(["xcrun", "simctl", "pbcopy", UDID], input=req["text"].encode("utf-8"), timeout=10)
+                time.sleep(0.3)
+                run("cliclick", "kd:cmd", "t:v", "ku:cmd")
             elif act == "key":
                 run("cliclick", "kp:" + {"backspace": "delete", "enter": "return"}[req["key"]])
             elif act == "home":
