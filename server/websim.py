@@ -134,7 +134,7 @@ button,input{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #5
 button:hover{background:#3a3a3a}
 #status{font-size:13px;color:#aaa}
 </style></head><body>
-<header>Приложение «Инвентарь» в симуляторе iPhone. Щелчок — касание, перетаскивание — свайп.
+<header>Приложение «Инвентарь» в симуляторе iOS. Щелчок — касание, перетаскивание — свайп.
 <div id="status">подключение…</div></header>
 <div id="wrap"><img id="screen" alt="экран симулятора" draggable="false"></div>
 <div class="bar">

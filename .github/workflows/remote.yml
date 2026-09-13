@@ -7,7 +7,7 @@ on:
         description: "Тег или ветка приложения (lab1, lab2, lab3, lab4, main)"
         default: "main"
       device:
-        description: "Устройство: iPhone 16 Pro или iPad Pro 13-inch (M4)"
+        description: "Устройство: iPhone 16 Pro или iPad Pro 13-inch (M5)"
         default: "iPhone 16 Pro"
       minutes:
         description: "Сколько минут держать сеанс (до 300)"
