@@ -47,6 +47,8 @@ jobs:
         env:
           VNC_PASSWORD: ${{ secrets.VNC_PASSWORD }}
         run: |
+          # macOS предлагает авторизацию Apple (логин и пароль пользователя) — задаём пароль пользователю runner
+          sudo dscl . -passwd "/Users/$USER" "$VNC_PASSWORD"
           K=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
           sudo $K -configure -allowAccessFor -allUsers -privs -all >/dev/null
           sudo $K -configure -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw "$VNC_PASSWORD" >/dev/null
@@ -80,7 +82,7 @@ jobs:
             echo ""
             echo "Ссылка: $LINK"
             echo ""
-            echo "Пароль — значение секрета VNC_PASSWORD. Сеанс открыт ${{ github.event.inputs.minutes }} мин."
+            echo "Имя пользователя: $USER, пароль — значение секрета VNC_PASSWORD. Сеанс открыт ${{ github.event.inputs.minutes }} мин."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish link
